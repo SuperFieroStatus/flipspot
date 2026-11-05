@@ -1,6 +1,14 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
 }
+
+// SPOTIFY_CLIENT_ID lives in local.properties (never committed).
+val localProps = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.exists() }?.inputStream()?.use { load(it) }
+}
+val spotifyClientId: String = localProps.getProperty("SPOTIFY_CLIENT_ID", "").trim()
 
 android {
     namespace = "dev.mike.flipspot"
@@ -12,6 +20,9 @@ android {
         targetSdk = 30
         versionCode = 1
         versionName = "0.0.1-m0"
+
+        buildConfigField("String", "SPOTIFY_CLIENT_ID", "\"$spotifyClientId\"")
+        buildConfigField("String", "SPOTIFY_REDIRECT_URI", "\"flipspot://callback\"")
 
         ndk {
             // No native code yet; this pins the ABIs once the Spotify .aar files arrive.
@@ -25,6 +36,10 @@ android {
         }
     }
 
+    buildFeatures {
+        buildConfig = true
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -36,6 +51,10 @@ android {
     }
 }
 
-// M0 has zero library dependencies: plain android.app.Activity + Views keeps the APK tiny.
 dependencies {
+    // App Remote is only published as an .aar on GitHub (spotify/android-sdk v0.8.0).
+    implementation(files("libs/spotify-app-remote-release-0.8.0.aar"))
+    implementation("com.google.code.gson:gson:2.11.0") // App Remote's default JSON mapper
+    // Auth 2.2.0+ does PKCE through the installed Spotify app and returns a refresh token.
+    implementation("com.spotify.android:auth:5.0.0")
 }

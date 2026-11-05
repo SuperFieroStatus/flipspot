@@ -2,8 +2,9 @@
 <resources>
     <string name="app_name">FlipSpot</string>
     <string name="np_idle">Not connected</string>
-    <string name="np_idle_sub">Spotify link arrives in M1</string>
+    <string name="np_idle_sub">Right soft key: Now Playing</string>
     <string name="soft_left">Options</string>
     <string name="soft_right">Playing</string>
     <string name="soft_center">Select</string>
+    <string name="soft_right_home">Home</string>
 </resources>
