@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="bg">#FF000000</color>
+    <color name="strip_bg">#FF181818</color>
+    <color name="text">#FFFFFFFF</color>
+    <color name="text_dim">#FFB3B3B3</color>
+    <color name="highlight">#FF1DB954</color>
+    <color name="highlight_text">#FF000000</color>
+    <color name="divider">#FF2A2A2A</color>
+</resources>
