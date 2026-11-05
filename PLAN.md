@@ -122,6 +122,24 @@ Keep a `scripts/deploy.ps1` that does build + install + launch + logcat in one g
 4. **Old Spotify build vs SDK version.** Use App Remote SDK 0.8.x (matches 2024-era Spotify builds). If connection fails with "CouldNotFindSpotifyApp"/version error, try one Spotify version newer.
 5. **Keycodes.** Soft keys and End/Call on the Flip 2 may report non-standard keycodes; dump them with `adb shell getevent -l` in M0 and hard-code the map in `KeyRouter`.
 
+### Spike results (2026-11-04, TCL Flip 2, Spotify 8.9.76, App Remote 0.8.0)
+
+- **Keycodes (M0):** all standard Android codes; table in `ui/KeyRouter.kt`. End never reaches apps (system Home).
+- **Auth (risk 2):** in-app consent fails. WebView 83 renders Spotify's consent page blank. Consenting once
+  via `scripts/get-token.ps1` in the desktop browser authorises both the Web API token *and* App Remote.
+  Dashboard must have **Web API** ticked as well as Android, or the native flow returns
+  `AUTHENTICATION_SERVICE_UNAVAILABLE`.
+- **Audiobooks (risk 1): App Remote works, no Web API fallback needed.**
+  - `/me/audiobooks` returns audiobook URIs as `spotify:show:<id>`; chapters as `spotify:episode:<id>`.
+  - `playUri(spotify:show:…)` plays on the phone, resuming in the book.
+  - `playUri(spotify:episode:<chapter>)` plays that chapter, then continues to the next chapter, which
+    resumes at its saved position.
+  - PlayerState reports chapters with `isEpisode`/`isPodcast`; artist/author is empty (use the book's
+    authors from the Web API for display).
+  - `resume_point` on chapters needs scope **`user-read-playback-position`** (not yet requested): add for M3.
+- **Spotify Connect:** App Remote steers whichever device is active (e.g. the PC). Now Playing shows the
+  active device (`GET /me/player`) and the left soft key "Play here" calls `connectSwitchToLocalDevice()`.
+
 ## 9. First Claude Code prompt
 
 > Read PLAN.md. Create the M0 scaffold: Kotlin, Android Views, minSdk/targetSdk 30, package dev.mike.flipspot, no Compose, no DI frameworks, ABIs armeabi-v7a+arm64-v8a. Implement HomeActivity as a focusable vertical list with a highlight bar, D-pad navigation, and a KeyRouter that logs every keycode received. Add scripts/deploy.ps1 (build, install, launch, logcat). Stop after M0 and report the keycodes you expect me to verify on-device.
