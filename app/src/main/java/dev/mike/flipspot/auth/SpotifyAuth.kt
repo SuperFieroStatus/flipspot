@@ -36,6 +36,7 @@ object SpotifyAuth {
         "playlist-read-private",
         "playlist-read-collaborative",
         "user-library-read",
+        "user-read-playback-position", // audiobook chapter resume points (M3)
         "app-remote-control",
         "streaming",
     )
@@ -174,6 +175,13 @@ object SpotifyAuth {
     }
 
     fun signOut(context: Context) = TokenStore.clear(context)
+
+    /** Call after a 401: marks the access token expired so the next [validAccessToken] refreshes. */
+    @Synchronized
+    fun invalidateAccessToken(context: Context) {
+        val t = TokenStore.load(context) ?: return
+        TokenStore.save(context, t.copy(expiresAtMs = 0))
+    }
 
     private class HttpError(val code: Int, val body: String) : Exception("HTTP $code")
 

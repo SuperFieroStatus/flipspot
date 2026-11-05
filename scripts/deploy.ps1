@@ -117,9 +117,27 @@ if (-not (Test-Path $Apk)) { Fail "APK not found: $Apk (run without -NoBuild)" }
 
 # ---- Install + launch ----
 Require-Device
+# The Flip 2 launcher resets a home-screen key shortcut when its target app is reinstalled.
+# Remember which keys point at FlipSpot and put them back afterwards.
+$shortcutKeys = 'keyshortcut_upkey', 'keyshortcut_downkey', 'keyshortcut_leftkey', 'keyshortcut_rightkey'
+$ours = @{}
+foreach ($k in $shortcutKeys) {
+    $v = ((Adb shell settings get global $k) -join '').Trim()
+    if ($v -like "*-$Package-*") { $ours[$k] = $v }
+}
+
 Step 'Installing'
 Adb install -r $Apk
 if ($LASTEXITCODE -ne 0) { Fail 'adb install failed' }
+
+if ($ours.Count -gt 0) { Start-Sleep -Seconds 5 }  # the launcher may react to the package change late
+foreach ($k in $ours.Keys) {
+    $now = ((Adb shell settings get global $k) -join '').Trim()
+    if ($now -ne $ours[$k]) {
+        Adb shell settings put global $k $ours[$k]
+        Step "Restored home-screen shortcut $k (launcher reset it on reinstall)"
+    }
+}
 
 if (-not $NoLaunch) {
     Adb logcat -c

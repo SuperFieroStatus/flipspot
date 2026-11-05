@@ -1,6 +1,7 @@
 package dev.mike.flipspot
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.ApplicationInfo
 import android.os.Build
@@ -10,17 +11,20 @@ import android.view.KeyEvent
 import android.view.View
 import android.widget.TextView
 import dev.mike.flipspot.auth.SpotifyAuth
+import dev.mike.flipspot.library.Library
 import dev.mike.flipspot.remote.SpotifyRemote
 import dev.mike.flipspot.ui.KeyAction
 import dev.mike.flipspot.ui.KeyActionHandler
 import dev.mike.flipspot.ui.KeyRouter
 import dev.mike.flipspot.ui.ListScreen
 import dev.mike.flipspot.ui.RoutedKey
+import dev.mike.flipspot.ui.Shortcuts
 import dev.mike.flipspot.ui.say
 
 class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
 
-    private data class MenuItem(val label: String, val run: () -> Unit)
+    /** [options]: what the left soft key does on this row (null = nothing to offer). */
+    private data class MenuItem(val label: String, val options: (() -> Unit)? = null, val run: () -> Unit)
 
     private var menu: List<MenuItem> = emptyList()
 
@@ -41,6 +45,7 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
         debuggable = (applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (debuggable) debugKey.visibility = View.VISIBLE
 
+        list.showFooter = false
         buildMenu(savedInstanceState?.getInt(STATE_SELECTED) ?: 0)
         list.requestFocus()
 
@@ -78,10 +83,13 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
         val items = mutableListOf<MenuItem>()
         if (!SpotifyAuth.isSignedIn(this)) items += MenuItem("Sign in to Spotify") { signIn() }
         items += MenuItem("Now Playing") { openNowPlaying() }
-        items += MenuItem("Playlists") { say("Playlists: M2") }
+        items += MenuItem("Playlists") { BrowseActivity.open(this, BrowseActivity.MODE_PLAYLISTS) }
         items += MenuItem("Audiobooks") { say("Audiobooks: M3") }
-        items += MenuItem("Liked Songs") { say("Liked Songs: M2") }
-        items += MenuItem("Albums") { say("Albums: M2") }
+        items += MenuItem("Liked Songs", options = ::likedSongsOptions) {
+            BrowseActivity.open(this, BrowseActivity.MODE_LIKED)
+        }
+        items += MenuItem("Made for you") { BrowseActivity.open(this, BrowseActivity.MODE_MADE_FOR_YOU) }
+        items += MenuItem("Albums") { BrowseActivity.open(this, BrowseActivity.MODE_ALBUMS) }
         items += MenuItem("Search") { say("Search: M4") }
         items += MenuItem("Settings") { say("Settings: M4") }
         val labels = items.map { it.label }
@@ -128,11 +136,19 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
             KeyAction.LEFT -> { list.page(-1); true }
             KeyAction.RIGHT -> { list.page(+1); true }
             KeyAction.OK -> { if (!repeat) menu.getOrNull(list.selectedIndex)?.run?.invoke(); true }
-            KeyAction.SOFT_LEFT -> { if (!repeat) say("Options menu: M2"); true }
+            KeyAction.SOFT_LEFT -> {
+                if (!repeat) {
+                    val opts = menu.getOrNull(list.selectedIndex)?.options
+                    if (opts != null) opts() else say("No options here")
+                }
+                true
+            }
             KeyAction.SOFT_RIGHT -> { if (!repeat) openNowPlaying(); true }
             KeyAction.PLAY_PAUSE -> { if (!repeat) SpotifyRemote.togglePlayPause(); true }
             KeyAction.DIGIT -> {
-                if (!repeat) say(if (key.digit == 0) "Search: M4" else "Pin ${key.digit}: M2")
+                if (!repeat) {
+                    if (key.digit == 0) say("Search: M4") else Shortcuts.playPin(this, key.digit)
+                }
                 true
             }
             KeyAction.STAR -> false // unused on Home
@@ -141,6 +157,28 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
     }
 
     private fun openNowPlaying() = startActivity(Intent(this, NowPlayingActivity::class.java))
+
+    /** Left soft key on "Liked Songs": play / shuffle / pin without opening the 1,700-row list. */
+    private fun likedSongsOptions() {
+        val app = applicationContext
+        FlipSpotApp.io.execute {
+            val uid = Library.userId(app) // cached after the first library fetch
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                if (uid == null) return@runOnUiThread say("Can't reach Spotify")
+                val uri = Library.likedSongsUri(uid)
+                val opts = listOf<Pair<String, () -> Unit>>(
+                    "Play" to { SpotifyRemote.playContext(uri, false); openNowPlaying() },
+                    "Shuffle" to { SpotifyRemote.playContext(uri, true); openNowPlaying() },
+                    "Pin to key…" to { Shortcuts.choosePinKey(this, uri, "Liked Songs") },
+                )
+                AlertDialog.Builder(this)
+                    .setTitle("Liked Songs")
+                    .setItems(opts.map { it.first }.toTypedArray()) { _, which -> opts[which].second() }
+                    .show()
+            }
+        }
+    }
 
     // ---- auth ----
 
@@ -177,6 +215,10 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
      */
     private fun handleDebugIntent(intent: Intent?) {
         if (!debuggable) return
+        if (intent?.getBooleanExtra(EXTRA_BROWSE_DUMP, false) == true) {
+            intent.removeExtra(EXTRA_BROWSE_DUMP)
+            dumpBrowseTree()
+        }
         val uri = intent?.getStringExtra(EXTRA_PLAY_URI) ?: return
         intent.removeExtra(EXTRA_PLAY_URI)
         Log.i(KeyRouter.TAG, "Debug: play_uri=$uri")
@@ -184,7 +226,26 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
         openNowPlaying()
     }
 
+    /**
+     * Debug: logs Spotify's browse tree two levels deep (tag FlipSpot, "Browse:").
+     *   adb shell am start -n dev.mike.flipspot/.HomeActivity --ez browse_dump true
+     */
+    private fun dumpBrowseTree() {
+        SpotifyRemote.browseRoot(com.spotify.android.appremote.api.ContentApi.ContentType.DEFAULT) { root ->
+            Log.i(KeyRouter.TAG, "Browse: root = ${root?.size ?: "FAILED"}")
+            root?.forEach { section ->
+                Log.i(KeyRouter.TAG, "Browse: [${section.title}] ${section.uri} playable=${section.playable} children=${section.hasChildren}")
+                if (section.hasChildren) SpotifyRemote.browseChildren(section, 30) { kids ->
+                    kids?.forEach { k ->
+                        Log.i(KeyRouter.TAG, "Browse:   [${section.title}] > ${k.title} | ${k.subtitle} | ${k.uri} playable=${k.playable}")
+                    } ?: Log.i(KeyRouter.TAG, "Browse:   [${section.title}] children FAILED")
+                }
+            }
+        }
+    }
+
     private companion object {
+        const val EXTRA_BROWSE_DUMP = "browse_dump"
         const val SCREEN = "Home"
         const val STATE_SELECTED = "selected"
         const val EXTRA_PLAY_URI = "play_uri"

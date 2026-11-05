@@ -140,6 +140,32 @@ Keep a `scripts/deploy.ps1` that does build + install + launch + logcat in one g
 - **Spotify Connect:** App Remote steers whichever device is active (e.g. the PC). Now Playing shows the
   active device (`GET /me/player`) and the left soft key "Play here" calls `connectSwitchToLocalDevice()`.
 
+### M2 findings (2026-11-04)
+
+- **Web API changes:** playlist contents are `GET /playlists/{id}/items` (entries under `item`); the old
+  `/tracks` returns 403. Playlist size is `items.total` (was `tracks.total`).
+- **Development-mode restriction:** `/items` is 403 for playlists owned by other users. FlipSpot shows those
+  as play/shuffle only (skips the request); App Remote `play(playlistUri)` still works for them.
+- **Play from a song:** App Remote `skipToIndex(context, i)` works for playlists and albums, but **ignores the
+  index for Liked Songs** (`spotify:user:<id>:collection` always starts at song 1). Liked Songs uses Web API
+  `PUT /me/player/play {context_uri, offset:{uri}}` instead, which works and keeps the collection context.
+- **Cache:** JSON files in `filesDir/library` instead of Room (no extra dependency). First Liked Songs fetch
+  (1,675 songs, 34 pages of 50) took ~14 s; playlists 0.5 s; albums 0.6 s. Shown from cache after that,
+  refreshed in the background when older than 6 h.
+- **Made for you (Discover Weekly etc.):** Spotify-made playlists aren't in `/me/playlists` and the Web API
+  won't read them for a Development-mode app. App Remote's Content API (`getRecommendedContentItems` +
+  `getChildrenOfItem`, the browse tree car/watch integrations use) lists them with URIs. FlipSpot keeps
+  personal mixes (`37i9dQZEVX…` Discover Weekly/Release Radar, `37i9dQZF1E…` Daily Mixes/DJ/radios), skips
+  editorial `37i9dQZF1DX…`, caches the list, and plays/pins them by URI. Discover Weekly's URI is stable per
+  account (contents change every Monday), so a pin keeps working. Debug dump:
+  `adb shell am start -n dev.mike.flipspot/.HomeActivity --ez browse_dump true`.
+- **Pins:** 1–9, each stores URI + name + optional shuffle (in order / shuffled). Work on Home and in lists;
+  on Now Playing only 1–3 (4–9 are transport keys there).
+- **Lists:** `ListScreen` is virtualised (only on-screen rows exist) so long lists stay cheap.
+- **Launcher4:** resets a home-screen key shortcut it doesn't know about (it keeps its own list) and crashed
+  once trying to write `Settings.System` without `android.permission.WRITE_SETTINGS`, which its manifest
+  never requests, so it can't be granted. `deploy.ps1` restores FlipSpot shortcuts after installs.
+
 ## 9. First Claude Code prompt
 
 > Read PLAN.md. Create the M0 scaffold: Kotlin, Android Views, minSdk/targetSdk 30, package dev.mike.flipspot, no Compose, no DI frameworks, ABIs armeabi-v7a+arm64-v8a. Implement HomeActivity as a focusable vertical list with a highlight bar, D-pad navigation, and a KeyRouter that logs every keycode received. Add scripts/deploy.ps1 (build, install, launch, logcat). Stop after M0 and report the keycodes you expect me to verify on-device.

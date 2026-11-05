@@ -16,6 +16,7 @@ import dev.mike.flipspot.ui.KeyAction
 import dev.mike.flipspot.ui.KeyActionHandler
 import dev.mike.flipspot.ui.KeyRouter
 import dev.mike.flipspot.ui.RoutedKey
+import dev.mike.flipspot.ui.Shortcuts
 import dev.mike.flipspot.ui.say
 
 /**
@@ -221,7 +222,7 @@ class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener 
                 5 -> SpotifyRemote.toggleShuffle()
                 8 -> SpotifyRemote.toggleRepeat()
                 0 -> say("Search: M4")
-                else -> say("Pin ${key.digit}: M2")
+                else -> Shortcuts.playPin(this, key.digit) // 1-3 (4-9 are transport keys here)
             }
             KeyAction.STAR -> say("Queue: M4")
             KeyAction.SOFT_LEFT -> if (playingElsewhere) playHere() else say("Options: M2")

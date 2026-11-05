@@ -28,7 +28,7 @@ $Root = Split-Path -Parent $PSScriptRoot
 $Package = 'dev.mike.flipspot'
 $Redirect = "http://127.0.0.1:$Port/callback"
 $Scopes = 'user-read-playback-state user-modify-playback-state user-read-currently-playing ' +
-          'playlist-read-private playlist-read-collaborative user-library-read app-remote-control streaming'
+          'playlist-read-private playlist-read-collaborative user-library-read user-read-playback-position app-remote-control streaming'
 
 function Fail($msg) { Write-Host "ERROR: $msg" -ForegroundColor Red; exit 1 }
 function B64Url([byte[]]$bytes) { [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_') }

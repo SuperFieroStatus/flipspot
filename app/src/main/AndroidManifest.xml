@@ -30,6 +30,12 @@
             android:screenOrientation="portrait"
             android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" />
 
+        <activity
+            android:name=".BrowseActivity"
+            android:exported="false"
+            android:screenOrientation="portrait"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenSize" />
+
         <!-- Required by Spotify auth 5.x: receives flipspot://callback from the browser fallback. -->
         <activity
             android:name="com.spotify.sdk.android.auth.browser.RedirectUriReceiverActivity"

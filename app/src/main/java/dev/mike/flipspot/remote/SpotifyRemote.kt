@@ -14,6 +14,7 @@ import com.spotify.android.appremote.api.error.UnsupportedFeatureVersionExceptio
 import com.spotify.android.appremote.api.error.UserNotAuthorizedException
 import com.spotify.protocol.client.CallResult
 import com.spotify.protocol.client.Subscription
+import com.spotify.protocol.types.ListItem
 import com.spotify.protocol.types.PlayerState
 import dev.mike.flipspot.BuildConfig
 import java.util.concurrent.CopyOnWriteArraySet
@@ -194,6 +195,74 @@ object SpotifyRemote {
         var target = (s.positionMs() + deltaMs).coerceAtLeast(0)
         if (dur > 0) target = target.coerceAtMost(dur - 1000)
         player("seekTo($target)") { it.seekTo(target) }
+    }
+
+    /** Play a playlist/album/collection from the top, with shuffle forced on or off first. */
+    fun playContext(uri: String, shuffle: Boolean) {
+        val r = remote
+        if (r == null || !r.isConnected) {
+            Log.w(TAG, "Remote: playContext ignored, not connected")
+            appContext?.let { start(it) }
+            return
+        }
+        Log.d(TAG, "Remote: setShuffle($shuffle) then play($uri)")
+        // Start playback only once shuffle has been applied, so the first track respects it.
+        // (player() would replace the result callback, so this chain talks to the API directly.)
+        val playNow = Runnable { player("play($uri)") { it.play(uri) } }
+        r.playerApi.setShuffle(shuffle)
+            .setResultCallback { main.post(playNow) }
+            .setErrorCallback { e ->
+                Log.w(TAG, "Remote: setShuffle failed (${e.message}), playing anyway")
+                main.post(playNow)
+            }
+    }
+
+    /**
+     * Play [contextUri] starting at [index] (so the rest of the playlist follows), shuffle off.
+     * Falls back to playing [trackUri] alone if Spotify rejects the index.
+     */
+    fun playFromIndex(contextUri: String, index: Int, trackUri: String) {
+        val r = remote
+        if (r == null || !r.isConnected) {
+            Log.w(TAG, "Remote: playFromIndex ignored, not connected")
+            appContext?.let { start(it) }
+            return
+        }
+        Log.d(TAG, "Remote: skipToIndex($contextUri, $index)")
+        r.playerApi.setShuffle(false)
+        r.playerApi.skipToIndex(contextUri, index)
+            .setResultCallback { Log.d(TAG, "Remote: skipToIndex ok") }
+            .setErrorCallback { e ->
+                Log.w(TAG, "Remote: skipToIndex failed (${e.message}), playing track alone")
+                main.post { player("play($trackUri)") { it.play(trackUri) } }
+            }
+    }
+
+    fun queue(uri: String) = player("queue($uri)") { it.queue(uri) }
+
+    fun setShuffle(on: Boolean) = player("setShuffle($on)") { it.setShuffle(on) }
+
+    // ---- Spotify's own browse tree (Made for you, Recently played…) via the Content API ----
+
+    /** Top-level browse sections. [cb] gets null on failure. Main thread. */
+    fun browseRoot(type: String, cb: (List<ListItem>?) -> Unit) {
+        val r = remote ?: return cb(null)
+        r.contentApi.getRecommendedContentItems(type)
+            .setResultCallback { items -> main.post { cb(items.items?.toList() ?: emptyList()) } }
+            .setErrorCallback { e ->
+                Log.w(TAG, "Remote: browse root failed: ${e.message}")
+                main.post { cb(null) }
+            }
+    }
+
+    fun browseChildren(item: ListItem, count: Int, cb: (List<ListItem>?) -> Unit) {
+        val r = remote ?: return cb(null)
+        r.contentApi.getChildrenOfItem(item, count, 0)
+            .setResultCallback { items -> main.post { cb(items.items?.toList() ?: emptyList()) } }
+            .setErrorCallback { e ->
+                Log.w(TAG, "Remote: browse '${item.title}' failed: ${e.message}")
+                main.post { cb(null) }
+            }
     }
 
     /** Move playback from another Connect device (e.g. a PC) to this phone. */
