@@ -37,6 +37,37 @@ data class Album(
     val tracks: List<Track>,
 )
 
+data class Book(
+    val id: String,
+    val name: String,
+    /** spotify:show:<id> (that's how /me/audiobooks reports audiobooks). */
+    val uri: String,
+    val authors: String,
+    val totalChapters: Int,
+)
+
+data class Chapter(
+    val name: String,
+    /** spotify:episode:<id> */
+    val uri: String,
+    val number: Int,
+    val durationMs: Long,
+    val fullyPlayed: Boolean,
+    val resumeMs: Long,
+    val playable: Boolean,
+) {
+    val inProgress: Boolean get() = !fullyPlayed && resumeMs > 0
+}
+
+/** Where to resume a book: first chapter in progress, else first unplayed, else the start. */
+fun List<Chapter>.resumeIndex(): Int {
+    indexOfFirst { it.inProgress && it.playable }.takeIf { it >= 0 }?.let { return it }
+    // After the last fully played chapter (not just the first unplayed: intros are often skipped).
+    val lastPlayed = indexOfLast { it.fullyPlayed }
+    val next = (lastPlayed + 1 until size).firstOrNull { this[it].playable }
+    return next ?: indexOfFirst { it.playable }.coerceAtLeast(0)
+}
+
 /** One delivery to a screen: cached data first (if any), then the network result. */
 data class LibraryUpdate<T>(
     val data: T?,
@@ -60,6 +91,7 @@ data class LibraryUpdate<T>(
 object Library {
     private const val TAG = "FlipSpot"
     const val MAX_AGE_MS = 6 * 60 * 60 * 1000L
+    const val CHAPTERS_MAX_AGE_MS = 2 * 60 * 1000L
     private val main = Handler(Looper.getMainLooper())
 
     // ---- public loaders (callbacks on the main thread) ----
@@ -75,6 +107,70 @@ object Library {
 
     fun albums(ctx: Context, force: Boolean, cb: (LibraryUpdate<List<Album>>) -> Unit) =
         load(ctx, "albums", force, ::decodeAlbums, ::fetchAlbums, cb)
+
+    // ---- audiobooks (M3) ----
+
+    fun audiobooks(ctx: Context, force: Boolean, cb: (LibraryUpdate<List<Book>>) -> Unit) =
+        load(ctx, "audiobooks", force, ::decodeBooks, ::fetchBooks, cb)
+
+    /**
+     * Chapters with resume points. Positions change as you listen, so the cache is only trusted for
+     * [CHAPTERS_MAX_AGE_MS]; it is still shown first and used when offline.
+     */
+    fun chapters(ctx: Context, book: Book, force: Boolean, cb: (LibraryUpdate<List<Chapter>>) -> Unit) =
+        load(
+            ctx, "book_${book.id}", force,
+            { json -> decodeChapters(json).also { registerChapters(book, it) } },
+            { c -> fetchChapters(c, book.id) }, cb, CHAPTERS_MAX_AGE_MS,
+        )
+
+    /** Blocking chapter fetch with cache fallback, for "resume" from a pin. Null if nothing usable. */
+    fun chaptersNow(ctx: Context, book: Book): List<Chapter>? {
+        val f = fetchChapters(ctx, book.id)
+        val json = if (f.json != null) {
+            f.json.put("fetched_at_ms", System.currentTimeMillis())
+            writeCache(ctx, "book_${book.id}", f.json)
+            f.json
+        } else {
+            readCache(ctx, "book_${book.id}")
+        } ?: return null
+        return decodeChapters(json).also { registerChapters(book, it) }
+    }
+
+    /** Cached book for a spotify:show: URI (for pins), or null. Blocking. */
+    fun bookByUri(ctx: Context, uri: String): Book? {
+        val json = readCache(ctx, "audiobooks") ?: return null
+        return runCatching { decodeBooks(json).firstOrNull { it.uri == uri } }.getOrNull()
+    }
+
+    /** Remember the book being listened to, so Now Playing can name it after a restart. */
+    fun setLastBook(ctx: Context, book: Book) {
+        ctx.applicationContext.getSharedPreferences("library", Context.MODE_PRIVATE).edit()
+            .putString("last_book", JSONObject().put("id", book.id).put("name", book.name).put("uri", book.uri)
+                .put("authors", book.authors).put("chapters", book.totalChapters).toString())
+            .apply()
+    }
+
+    /**
+     * "Book · Author" for a chapter URI. Spotify's player state leaves the artist empty for audiobook
+     * chapters. Checks chapters seen this session, then the last book's cached chapter list. Blocking.
+     */
+    fun bookLabelForChapter(ctx: Context, chapterUri: String): String? {
+        chapterBooks[chapterUri]?.let { return it }
+        val raw = ctx.applicationContext.getSharedPreferences("library", Context.MODE_PRIVATE)
+            .getString("last_book", null) ?: return null
+        val o = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val book = Book(o.optString("id"), o.optString("name"), o.optString("uri"), o.optString("authors"), o.optInt("chapters"))
+        readCache(ctx, "book_${book.id}")?.let { runCatching { registerChapters(book, decodeChapters(it)) } }
+        return chapterBooks[chapterUri]
+    }
+
+    private val chapterBooks = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    private fun registerChapters(book: Book, chapters: List<Chapter>) {
+        val label = if (book.authors.isEmpty()) book.name else "${book.name} · ${book.authors}"
+        chapters.forEach { chapterBooks[it.uri] = label }
+    }
 
     /** Spotify user id (cached), needed for the Liked Songs context URI. Blocking. */
     fun userId(ctx: Context): String? {
@@ -123,13 +219,14 @@ object Library {
         decode: (JSONObject) -> T,
         fetch: (Context) -> Fetched,
         cb: (LibraryUpdate<T>) -> Unit,
+        maxAgeMs: Long = MAX_AGE_MS,
     ) {
         val app = ctx.applicationContext
         FlipSpotApp.io.execute {
             val cachedJson = readCache(app, key)
             val cachedAt = cachedJson?.optLong("fetched_at_ms") ?: 0L
             val cached = cachedJson?.let { runCatching { decode(it) }.getOrNull() }
-            val stale = cached == null || force || System.currentTimeMillis() - cachedAt > MAX_AGE_MS
+            val stale = cached == null || force || System.currentTimeMillis() - cachedAt > maxAgeMs
             if (cached != null) {
                 post(cb, LibraryUpdate(cached, cachedAt, false, null, false, done = !stale))
             }
@@ -221,6 +318,62 @@ object Library {
             )
         }
         return if (err != null) describe(err) else Fetched(JSONObject().put("items", out), null)
+    }
+
+    private fun fetchBooks(ctx: Context): Fetched {
+        val out = JSONArray()
+        val err = SpotifyWebApi.forEachPaged(ctx, "/me/audiobooks?limit=50") { b ->
+            val authors = b.optJSONArray("authors")
+            out.put(
+                JSONObject()
+                    .put("id", b.optString("id"))
+                    .put("name", b.optString("name"))
+                    .put("uri", b.optString("uri"))
+                    .put("authors", (0 until (authors?.length() ?: 0))
+                        .mapNotNull { authors?.optJSONObject(it)?.optString("name")?.ifEmpty { null } }
+                        .joinToString(", "))
+                    .put("chapters", b.optInt("total_chapters")),
+            )
+        }
+        return if (err != null) describe(err) else Fetched(JSONObject().put("items", out), null)
+    }
+
+    private fun fetchChapters(ctx: Context, bookId: String): Fetched {
+        val out = JSONArray()
+        // 50 is the endpoint's maximum page size (51 -> HTTP 400).
+        val err = SpotifyWebApi.forEachPaged(ctx, "/audiobooks/$bookId/chapters?limit=50") { c ->
+            val rp = c.optJSONObject("resume_point")
+            out.put(
+                JSONObject()
+                    .put("n", c.optString("name"))
+                    .put("u", c.optString("uri"))
+                    .put("no", c.optInt("chapter_number"))
+                    .put("d", c.optLong("duration_ms"))
+                    .put("f", rp?.optBoolean("fully_played") ?: false)
+                    .put("r", rp?.optLong("resume_position_ms") ?: 0L)
+                    .put("p", c.optBoolean("is_playable", true)),
+            )
+        }
+        return if (err != null) describe(err) else Fetched(JSONObject().put("items", out), null)
+    }
+
+    private fun decodeBooks(o: JSONObject): List<Book> {
+        val arr = o.getJSONArray("items")
+        return (0 until arr.length()).map { i ->
+            val b = arr.getJSONObject(i)
+            Book(b.optString("id"), b.optString("name"), b.optString("uri"), b.optString("authors"), b.optInt("chapters"))
+        }
+    }
+
+    private fun decodeChapters(o: JSONObject): List<Chapter> {
+        val arr = o.getJSONArray("items")
+        return (0 until arr.length()).map { i ->
+            val c = arr.getJSONObject(i)
+            Chapter(
+                c.optString("n"), c.optString("u"), c.optInt("no"), c.optLong("d"),
+                c.optBoolean("f"), c.optLong("r"), c.optBoolean("p", true),
+            )
+        }
     }
 
     // ---- JSON <-> model ----

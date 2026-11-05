@@ -11,7 +11,11 @@ import android.view.View
 import android.widget.TextView
 import dev.mike.flipspot.api.SpotifyWebApi
 import dev.mike.flipspot.library.Album
+import dev.mike.flipspot.library.Book
+import dev.mike.flipspot.library.Chapter
 import dev.mike.flipspot.library.Library
+import dev.mike.flipspot.library.resumeIndex
+import dev.mike.flipspot.ui.Audiobooks
 import dev.mike.flipspot.library.LibraryUpdate
 import dev.mike.flipspot.library.Playlist
 import dev.mike.flipspot.library.Track
@@ -55,7 +59,32 @@ class BrowseActivity : Activity(), KeyActionHandler {
         class Song(val track: Track, val index: Int) : Row() {
             override val item = ListItem(track.name, track.artists, dim = !track.playable)
         }
+        class OpenBook(val book: Book) : Row() {
+            override val item = ListItem(book.name, "${book.authors} · ${book.totalChapters} ch")
+        }
+        class ChapterRow(val chapter: Chapter) : Row() {
+            override val item = ListItem(
+                (if (chapter.inProgress) "▶ " else "") + chapter.name,
+                when {
+                    chapter.inProgress ->
+                        "${Audiobooks.formatTime(chapter.resumeMs)} of ${Audiobooks.formatTime(chapter.durationMs)}"
+                    chapter.fullyPlayed -> "✓ played · ${Audiobooks.formatTime(chapter.durationMs)}"
+                    else -> Audiobooks.formatTime(chapter.durationMs)
+                },
+                dim = chapter.fullyPlayed || !chapter.playable,
+            )
+        }
     }
+
+    /** The book shown in BOOK mode (rebuilt from extras). */
+    private val book: Book? by lazy {
+        val id = intent.getStringExtra(EXTRA_ID) ?: return@lazy null
+        Book(
+            id, intent.getStringExtra(EXTRA_NAME) ?: "", intent.getStringExtra(EXTRA_URI) ?: "",
+            intent.getStringExtra(EXTRA_AUTHORS) ?: "", intent.getIntExtra(EXTRA_CHAPTERS, 0),
+        )
+    }
+    private var chapters: List<Chapter> = emptyList()
 
     private lateinit var mode: String
     private lateinit var list: ListScreen
@@ -87,6 +116,7 @@ class BrowseActivity : Activity(), KeyActionHandler {
             MODE_LIKED -> "Liked Songs"
             MODE_ALBUMS -> "Albums"
             MODE_MADE_FOR_YOU -> "Made for you"
+            MODE_AUDIOBOOKS -> "Audiobooks"
             else -> contextName
         }
         list.setEmptyText("Loading…")
@@ -137,7 +167,33 @@ class BrowseActivity : Activity(), KeyActionHandler {
                 }
             }
             MODE_MADE_FOR_YOU -> loadMadeForYou()
+            MODE_AUDIOBOOKS -> Library.audiobooks(this, force) { u ->
+                show(u) { books -> books.map { Row.OpenBook(it) } }
+            }
+            MODE_BOOK -> {
+                val b = book ?: return
+                Library.chapters(this, b, force) { u ->
+                    val first = rows.isEmpty()
+                    show(u) { chs ->
+                        chapters = chs
+                        bookRows(b, chs)
+                    }
+                    // Start on the chapter you're in, so OK continues it.
+                    if (first && chapters.isNotEmpty()) {
+                        list.select(BOOK_HEAD_ROWS + chapters.resumeIndex())
+                    }
+                }
+            }
         }
+    }
+
+    private fun bookRows(b: Book, chs: List<Chapter>): List<Row> {
+        val resumeLabel = if (chs.isEmpty()) "▶ Resume" else {
+            val c = chs[chs.resumeIndex()]
+            "▶ Resume: ${c.name}" + if (c.inProgress) " (${Audiobooks.formatTime(c.resumeMs)})" else ""
+        }
+        val head = listOf<Row>(Row.Action(ListItem(resumeLabel, b.authors)) { Audiobooks.resume(this, b, chapters) })
+        return head + chs.map { Row.ChapterRow(it) }
     }
 
     /**
@@ -320,6 +376,8 @@ class BrowseActivity : Activity(), KeyActionHandler {
                 )
             }
             is Row.Mix -> play(row.playlist.uri, false)
+            is Row.OpenBook -> openBook(this, row.book)
+            is Row.ChapterRow -> book?.let { Audiobooks.playChapter(this, it, row.chapter) }
             is Row.OpenAlbum -> open(this, MODE_ALBUM, row.album.id, row.album.name, row.album.uri)
             is Row.Song -> playSong(row)
         }
@@ -333,6 +391,24 @@ class BrowseActivity : Activity(), KeyActionHandler {
                 opts += "Play" to { play(p.uri, false) }
                 opts += "Shuffle" to { play(p.uri, true) }
                 opts += "Pin to key…" to { Shortcuts.choosePinKey(this, p.uri, p.name) }
+            }
+            is Row.OpenBook -> {
+                val b = row.book
+                opts += "Resume" to { Audiobooks.resume(this, b) }
+                opts += "Chapters" to { openBook(this, b) }
+                opts += "Pin to key…" to { Shortcuts.choosePinKey(this, b.uri, b.name, askShuffle = false) }
+            }
+            is Row.ChapterRow -> {
+                val b = book
+                if (b != null) {
+                    opts += "Play from saved spot" to { Audiobooks.playChapter(this, b, row.chapter) }
+                    opts += "Play from start" to {
+                        Audiobooks.playChapter(this, b, row.chapter.copy(fullyPlayed = false, resumeMs = 0))
+                    }
+                    opts += "Pin this book to key…" to {
+                        Shortcuts.choosePinKey(this, b.uri, b.name, askShuffle = false)
+                    }
+                }
             }
             is Row.Mix -> {
                 val p = row.playlist
@@ -356,7 +432,7 @@ class BrowseActivity : Activity(), KeyActionHandler {
             else -> Unit
         }
         val ctx = contextUri
-        if (ctx != null && mode != MODE_PLAYLISTS && mode != MODE_ALBUMS && mode != MODE_MADE_FOR_YOU) {
+        if (ctx != null && mode in setOf(MODE_PLAYLIST, MODE_LIKED, MODE_ALBUM)) {
             opts += "Pin “${title.text}” to key…" to { Shortcuts.choosePinKey(this, ctx, title.text.toString()) }
         }
         opts += "Refresh list" to { load(force = true) }
@@ -412,6 +488,20 @@ class BrowseActivity : Activity(), KeyActionHandler {
         const val MODE_ALBUMS = "albums"
         const val MODE_ALBUM = "album"
         const val MODE_MADE_FOR_YOU = "made_for_you"
+        const val MODE_AUDIOBOOKS = "audiobooks"
+        const val MODE_BOOK = "book"
+        private const val EXTRA_AUTHORS = "authors"
+        private const val EXTRA_CHAPTERS = "chapters"
+        /** Rows above the chapter list in BOOK mode ("Resume"). */
+        private const val BOOK_HEAD_ROWS = 1
+
+        fun openBook(ctx: Context, b: Book) {
+            ctx.startActivity(
+                makeIntent(ctx, MODE_BOOK, b.id, b.name, b.uri)
+                    .putExtra(EXTRA_AUTHORS, b.authors)
+                    .putExtra(EXTRA_CHAPTERS, b.totalChapters),
+            )
+        }
 
         private const val EXTRA_LISTABLE = "listable"
 

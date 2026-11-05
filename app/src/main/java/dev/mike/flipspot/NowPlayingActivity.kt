@@ -12,6 +12,7 @@ import android.widget.TextView
 import com.spotify.protocol.types.Repeat
 import dev.mike.flipspot.api.SpotifyWebApi
 import dev.mike.flipspot.remote.SpotifyRemote
+import dev.mike.flipspot.ui.Audiobooks
 import dev.mike.flipspot.ui.KeyAction
 import dev.mike.flipspot.ui.KeyActionHandler
 import dev.mike.flipspot.ui.KeyRouter
@@ -25,6 +26,7 @@ import dev.mike.flipspot.ui.say
  *   4 / 6   -15 s / +30 s   7 / 9         -5 min / +5 min
  *   5       shuffle         8             repeat
  *   *       queue (M4)      Back          up one level
+ *   Up/Down speed 1x/1.2x/1.5x/2x (audiobooks and podcasts only)
  */
 class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
 
@@ -104,8 +106,9 @@ class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener 
             softCenter.text = if (snapshot.status == SpotifyRemote.Status.FAILED) "Retry" else ""
         } else {
             title.text = track.name ?: "—"
-            artist.text = track.artists?.mapNotNull { it.name }?.joinToString(", ")?.ifEmpty { null }
-                ?: track.artist?.name ?: track.album?.name ?: ""
+            val named = track.artists?.mapNotNull { it.name?.ifEmpty { null } }?.joinToString(", ")?.ifEmpty { null }
+                ?: track.artist?.name?.ifEmpty { null } ?: track.album?.name?.ifEmpty { null }
+            artist.text = named ?: bookLabelFor(track.uri) ?: ""
             playState.text = if (s.isPaused) "❚❚ Paused" else "▶ Playing"
             softCenter.text = if (s.isPaused) "Play" else "Pause"
             val opts = s.playbackOptions
@@ -114,15 +117,32 @@ class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener 
                 Repeat.ALL -> "all"
                 else -> "off"
             }
-            val kind = when {
-                track.isPodcast || track.isEpisode -> "  ·  episode"
-                track.uri?.startsWith("spotify:audiobook") == true ||
-                    track.uri?.startsWith("spotify:chapter") == true -> "  ·  audiobook"
-                else -> ""
+            flags.text = if (isSpoken(track)) {
+                // Shuffle means nothing inside a chapter; speed does (Up/Down to change).
+                "Speed ${Audiobooks.speedLabel(currentSpeed())}  ·  Repeat $repeat"
+            } else {
+                "Shuffle ${if (opts?.isShuffling == true) "on" else "off"}  ·  Repeat $repeat"
             }
-            flags.text = "Shuffle ${if (opts?.isShuffling == true) "on" else "off"}  ·  Repeat $repeat$kind"
         }
         renderPosition(snapshot)
+    }
+
+    // Audiobook chapters come with no artist; look the book up from the library cache (io thread).
+    private val bookLabels = HashMap<String, String?>()
+
+    private fun bookLabelFor(uri: String?): String? {
+        if (uri == null || !uri.startsWith("spotify:episode:")) return null
+        if (bookLabels.containsKey(uri)) return bookLabels[uri]
+        bookLabels[uri] = null // lookup in flight / not found
+        val app = applicationContext
+        FlipSpotApp.io.execute {
+            val label = dev.mike.flipspot.library.Library.bookLabelForChapter(app, uri)
+            if (label != null) runOnUiThread {
+                bookLabels[uri] = label
+                if (!isDestroyed && SpotifyRemote.snapshot.state?.track?.uri == uri) artist.text = label
+            }
+        }
+        return null
     }
 
     private fun renderStatus(snapshot: SpotifyRemote.Snapshot) {
@@ -225,12 +245,38 @@ class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener 
                 else -> Shortcuts.playPin(this, key.digit) // 1-3 (4-9 are transport keys here)
             }
             KeyAction.STAR -> say("Queue: M4")
-            KeyAction.SOFT_LEFT -> if (playingElsewhere) playHere() else say("Options: M2")
+            KeyAction.SOFT_LEFT -> if (playingElsewhere) playHere() else say("Options: coming in M4")
             KeyAction.SOFT_RIGHT -> finish() // labelled "Home": back to the menu
-            KeyAction.UP, KeyAction.DOWN -> Unit
+            KeyAction.UP -> stepSpeed(+1)
+            KeyAction.DOWN -> stepSpeed(-1)
             KeyAction.BACK -> return false
         }
         return true
+    }
+
+    private fun isSpoken(track: com.spotify.protocol.types.Track?): Boolean =
+        track != null && (track.isEpisode || track.isPodcast || track.uri?.startsWith("spotify:episode:") == true)
+
+    /** Current speed in percent: what FlipSpot last set / saw while playing, else the saved preference. */
+    private fun currentSpeed(): Int = SpotifyRemote.speedPercent ?: Audiobooks.preferredSpeed(this)
+
+    /** Up/Down: 1x <-> 1.2x <-> 1.5x <-> 2x for audiobooks and podcasts (Spotify ignores speed for music). */
+    private fun stepSpeed(dir: Int) {
+        if (!isSpoken(SpotifyRemote.snapshot.state?.track)) return say("Speed is for audiobooks")
+        val speeds = Audiobooks.SPEEDS
+        val now = currentSpeed()
+        // Nearest step to what's playing now (e.g. if it was set to 0.8x or 3x elsewhere).
+        val idx = speeds.indices.minByOrNull { kotlin.math.abs(speeds[it] - now) } ?: 0
+        val target = speeds[(idx + dir).coerceIn(0, speeds.size - 1)]
+        if (target == now) return say(Audiobooks.speedLabel(target) + if (dir > 0) " (fastest)" else " (normal)")
+        SpotifyRemote.setSpeed(target) { ok ->
+            if (ok) {
+                Audiobooks.savePreferredSpeed(this, target)
+                say(Audiobooks.speedLabel(target))
+            } else {
+                say("Spotify refused ${Audiobooks.speedLabel(target)}")
+            }
+        }
     }
 
     private fun seek(deltaMs: Long) {

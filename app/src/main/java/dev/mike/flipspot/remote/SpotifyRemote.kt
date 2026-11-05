@@ -14,7 +14,9 @@ import com.spotify.android.appremote.api.error.UnsupportedFeatureVersionExceptio
 import com.spotify.android.appremote.api.error.UserNotAuthorizedException
 import com.spotify.protocol.client.CallResult
 import com.spotify.protocol.client.Subscription
+import com.spotify.protocol.types.Empty
 import com.spotify.protocol.types.ListItem
+import com.spotify.protocol.types.PlaybackSpeed
 import com.spotify.protocol.types.PlayerState
 import dev.mike.flipspot.BuildConfig
 import java.util.concurrent.CopyOnWriteArraySet
@@ -139,6 +141,13 @@ object SpotifyRemote {
         sub.setEventCallback { state ->
             main.post {
                 snapshot = Snapshot(Status.CONNECTED, state, SystemClock.elapsedRealtime(), null)
+                // Spotify can send one more state with the *old* speed right after a change; don't let it
+                // overwrite what we just set.
+                val sinceSet = SystemClock.elapsedRealtime() - speedSetAtMs
+                if (!state.isPaused && state.playbackSpeed > 0f && sinceSet > SPEED_TRUST_MS) {
+                    speedPercent = Math.round(state.playbackSpeed * 100)
+                }
+                applyPendingSeek(state)
                 notifyListeners()
             }
         }
@@ -240,7 +249,79 @@ object SpotifyRemote {
 
     fun queue(uri: String) = player("queue($uri)") { it.queue(uri) }
 
+    // Applied once Spotify reports the chapter is playing (audiobook resume): position and speed.
+    private data class PendingStart(val uri: String, val positionMs: Long, val speedPercent: Int?)
+
+    private var pendingStart: PendingStart? = null
+    private val clearPendingStart = Runnable { pendingStart = null }
+
+    /**
+     * Plays [uri] (an audiobook chapter) and makes sure it ends up at [positionMs] and [speedPercent]:
+     * Spotify usually resumes chapters itself, but if the first state for this URI is more than 5 s off,
+     * seek. Speed is applied after the chapter starts so it doesn't land on the previous item.
+     */
+    fun playAt(uri: String, positionMs: Long, speedPercent: Int? = null) {
+        pendingStart = PendingStart(uri, positionMs, speedPercent)
+        main.removeCallbacks(clearPendingStart)
+        main.postDelayed(clearPendingStart, 15_000)
+        Log.d(TAG, "Remote: playAt($uri, ${positionMs / 1000}s, speed=$speedPercent)")
+        playUri(uri)
+    }
+
+    private fun applyPendingSeek(state: PlayerState) {
+        val p = pendingStart ?: return
+        if (state.track?.uri != p.uri) return
+        pendingStart = null
+        main.removeCallbacks(clearPendingStart)
+        if (kotlin.math.abs(state.playbackPosition - p.positionMs) > 5_000) {
+            Log.d(TAG, "Remote: resume seek ${state.playbackPosition / 1000}s -> ${p.positionMs / 1000}s")
+            player("seekTo(${p.positionMs})") { it.seekTo(p.positionMs) }
+        } else {
+            Log.d(TAG, "Remote: Spotify resumed at ${state.playbackPosition / 1000}s itself")
+        }
+        // Always (re)apply: the reported speed can be stale, and the call is cheap.
+        p.speedPercent?.let { setSpeed(it) }
+    }
+
     fun setShuffle(on: Boolean) = player("setShuffle($on)") { it.setShuffle(on) }
+
+    /**
+     * Last known playback speed in percent, or null if unknown. Spotify doesn't push a fresh PlayerState
+     * after a speed change (and paused states can carry a stale speed), so this is updated from our own
+     * successful setSpeed calls and only from states that are actually playing.
+     */
+    var speedPercent: Int? = null
+        private set
+    private var speedSetAtMs = 0L
+    private const val SPEED_TRUST_MS = 4_000L
+
+    /**
+     * Playback speed for podcasts/audiobooks, in percent (100 = 1x). The SDK's enum only offers
+     * 50/80/100/120/150/200/300, but the wire message carries a plain int, so this sends it directly.
+     */
+    fun setSpeed(percent: Int, onResult: ((Boolean) -> Unit)? = null) {
+        val r = remote
+        if (r == null || !r.isConnected) {
+            Log.w(TAG, "Remote: setSpeed ignored, not connected")
+            onResult?.invoke(false)
+            return
+        }
+        Log.d(TAG, "Remote: setSpeed($percent)")
+        r.call("com.spotify.set_playback_speed", PlaybackSpeed(percent), Empty::class.java)
+            .setResultCallback {
+                Log.d(TAG, "Remote: setSpeed($percent) ok")
+                main.post {
+                    speedPercent = percent
+                    speedSetAtMs = SystemClock.elapsedRealtime()
+                    notifyListeners()
+                    onResult?.invoke(true)
+                }
+            }
+            .setErrorCallback { e ->
+                Log.w(TAG, "Remote: setSpeed($percent) failed: ${e.message}")
+                main.post { onResult?.invoke(false) }
+            }
+    }
 
     // ---- Spotify's own browse tree (Made for you, Recently played…) via the Content API ----
 

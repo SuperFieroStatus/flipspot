@@ -161,6 +161,25 @@ Keep a `scripts/deploy.ps1` that does build + install + launch + logcat in one g
   `adb shell am start -n dev.mike.flipspot/.HomeActivity --ez browse_dump true`.
 - **Pins:** 1–9, each stores URI + name + optional shuffle (in order / shuffled). Work on Home and in lists;
   on Now Playing only 1–3 (4–9 are transport keys there).
+### M3 findings (2026-11-04)
+
+- `GET /me/audiobooks` gives authors, narrators, `total_chapters`; `GET /audiobooks/{id}/chapters` pages at
+  **50 max** (51 -> 400) and, with scope `user-read-playback-position`, returns `resume_point`
+  (`fully_played`, `resume_position_ms`) per chapter.
+- Playing the book URI (`spotify:show:`) lets Spotify pick a chapter, which can be wrong (it started the
+  Prologue while the listener was in Chapter 16). FlipSpot resumes itself: first in-progress chapter, else
+  the one after the last fully played; plays that chapter URI. **Spotify resumed at the saved position by
+  itself** in every test; `SpotifyRemote.playAt` seeks only if the first state is >5 s off.
+- Chapter cache trusted for 2 min (positions move as you listen); shown first, used offline.
+- Player state has no artist for chapters; Now Playing shows "Book · Author" from the chapter cache.
+- Book pins resume (fresh chapter fetch, cache fallback) instead of playing the show URI.
+- **Playback speed:** App Remote message `com.spotify.set_playback_speed` (int percent). Spotify 8.9 accepts
+  only **50, 80, 100, 120, 150, 200, 300**; 125 and 175 are rejected ("Unexpected playback speed"), as are
+  130–180 and 250. Now Playing Up/Down step 1x / 1.2x / 1.5x / 2x (audiobooks and podcasts only); the
+  choice is saved and re-applied when a chapter starts. Spotify doesn't push a fresh PlayerState after a
+  speed change and can send one stale "old speed" state right after it, so FlipSpot tracks the speed it set
+  and ignores reported speed for 4 s after a change. Debug: `--ei speed <percent>` on HomeActivity.
+
 - **Lists:** `ListScreen` is virtualised (only on-screen rows exist) so long lists stay cheap.
 - **Launcher4:** resets a home-screen key shortcut it doesn't know about (it keeps its own list) and crashed
   once trying to write `Settings.System` without `android.permission.WRITE_SETTINGS`, which its manifest

@@ -33,6 +33,7 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
     private lateinit var npSub: TextView
     private lateinit var debugKey: TextView
     private var debuggable = false
+    private val main = android.os.Handler(android.os.Looper.getMainLooper())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -84,7 +85,7 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
         if (!SpotifyAuth.isSignedIn(this)) items += MenuItem("Sign in to Spotify") { signIn() }
         items += MenuItem("Now Playing") { openNowPlaying() }
         items += MenuItem("Playlists") { BrowseActivity.open(this, BrowseActivity.MODE_PLAYLISTS) }
-        items += MenuItem("Audiobooks") { say("Audiobooks: M3") }
+        items += MenuItem("Audiobooks") { BrowseActivity.open(this, BrowseActivity.MODE_AUDIOBOOKS) }
         items += MenuItem("Liked Songs", options = ::likedSongsOptions) {
             BrowseActivity.open(this, BrowseActivity.MODE_LIKED)
         }
@@ -215,6 +216,15 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
      */
     private fun handleDebugIntent(intent: Intent?) {
         if (!debuggable) return
+        // Debug: adb shell am start -n dev.mike.flipspot/.HomeActivity --ei speed 125
+        intent?.getIntExtra("speed", 0)?.takeIf { it > 0 }?.let { pct ->
+            intent.removeExtra("speed")
+            SpotifyRemote.setSpeed(pct) { ok ->
+                main.postDelayed({
+                    Log.i(KeyRouter.TAG, "Speed: asked $pct ok=$ok, player reports ${SpotifyRemote.snapshot.state?.playbackSpeed}")
+                }, 1500)
+            }
+        }
         if (intent?.getBooleanExtra(EXTRA_BROWSE_DUMP, false) == true) {
             intent.removeExtra(EXTRA_BROWSE_DUMP)
             dumpBrowseTree()
