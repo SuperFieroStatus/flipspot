@@ -100,7 +100,7 @@ Lists use a persistent highlight bar; the selected row is always fully visible (
 **M4 — Search + polish (1–2 sessions)**
 - T9 entry, results, queue view, settings, error handling, release keystore, `minifyEnabled true` with R8 to shrink.
 
-**M5 — Launcher integration (done 2026-11-05, separate project: `C:\dev\fiero-launcher`)**
+**M5 — Launcher integration (done 2026-11-05, separate project: [fiero-launcher](https://github.com/SuperFieroStatus/fiero-launcher))**
 - Fiero Launcher replaces Launcher4 as the default home (Launcher4 stays installed as the fallback). FlipSpot is
   its D-pad Right shortcut and right soft key. Its Now Playing line reads Spotify's MediaSession directly, so
   FlipSpot needed no provider; see Fiero's PLAN.md for the reasoning and phone findings.

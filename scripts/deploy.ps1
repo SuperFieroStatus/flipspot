@@ -125,7 +125,7 @@ if (-not (Test-Path $Apk)) { Fail "APK not found: $Apk (run without -NoBuild)" }
 Require-Device
 # Launcher4 resets a home-screen key shortcut when its target app is reinstalled. Remember which keys
 # point at FlipSpot and put them back afterwards -- only while Launcher4 is the default home. Fiero
-# Launcher (C:\dev\fiero-launcher) keeps its shortcuts in its own prefs and needs none of this.
+# Launcher (github.com/SuperFieroStatus/fiero-launcher) keeps its shortcuts in its own prefs and needs none of this.
 $homeApp = ((Adb shell cmd package resolve-activity --brief -c android.intent.category.HOME -a android.intent.action.MAIN) |
     Select-Object -Last 1).Trim()
 $shortcutKeys = 'keyshortcut_upkey', 'keyshortcut_downkey', 'keyshortcut_leftkey', 'keyshortcut_rightkey'

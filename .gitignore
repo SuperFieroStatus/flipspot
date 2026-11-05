@@ -9,3 +9,5 @@ captures/
 *.keystore
 *.jks
 token.json
+app/libs/*.aar
+M5-LAUNCHER-PROMPT.md

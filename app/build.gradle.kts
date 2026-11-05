@@ -10,6 +10,13 @@ val localProps = Properties().apply {
 }
 val spotifyClientId: String = localProps.getProperty("SPOTIFY_CLIENT_ID", "").trim()
 
+val appRemoteAar = file("libs/spotify-app-remote-release-0.8.0.aar")
+if (!appRemoteAar.exists()) {
+    throw GradleException(
+        "Missing ${appRemoteAar.name}. Run scripts/get-spotify-sdk.ps1 (or see README: Build) to download it.",
+    )
+}
+
 android {
     namespace = "dev.mike.flipspot"
     compileSdk = 37
@@ -58,8 +65,9 @@ android {
 }
 
 dependencies {
-    // App Remote is only published as an .aar on GitHub (spotify/android-sdk v0.8.0).
-    implementation(files("libs/spotify-app-remote-release-0.8.0.aar"))
+    // App Remote is only published as an .aar on GitHub (spotify/android-sdk v0.8.0). Not committed:
+    // fetch it with scripts/get-spotify-sdk.ps1 (checked below so the error says what to do).
+    implementation(files(appRemoteAar))
     implementation("com.google.code.gson:gson:2.11.0") // App Remote's default JSON mapper
     // Auth 2.2.0+ does PKCE through the installed Spotify app and returns a refresh token.
     implementation("com.spotify.android:auth:5.0.0")
