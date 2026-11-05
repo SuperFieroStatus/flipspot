@@ -100,8 +100,10 @@ Lists use a persistent highlight bar; the selected row is always fully visible (
 **M4 — Search + polish (1–2 sessions)**
 - T9 entry, results, queue view, settings, error handling, release keystore, `minifyEnabled true` with R8 to shrink.
 
-**M5 — Launcher integration (later, separate project)**
-- Replace Launcher4 with your own minimal launcher; FlipSpot becomes a key shortcut and Now Playing strip source.
+**M5 — Launcher integration (done 2026-11-05, separate project: `C:\dev\fiero-launcher`)**
+- Fiero Launcher replaces Launcher4 as the default home (Launcher4 stays installed as the fallback). FlipSpot is
+  its D-pad Right shortcut and right soft key. Its Now Playing line reads Spotify's MediaSession directly, so
+  FlipSpot needed no provider; see Fiero's PLAN.md for the reasoning and phone findings.
 
 ## 7. Dev loop
 
@@ -202,7 +204,8 @@ Keep a `scripts/deploy.ps1` that does build + install + launch + logcat in one g
 - **Lists:** `ListScreen` is virtualised (only on-screen rows exist) so long lists stay cheap.
 - **Launcher4:** resets a home-screen key shortcut it doesn't know about (it keeps its own list) and crashed
   once trying to write `Settings.System` without `android.permission.WRITE_SETTINGS`, which its manifest
-  never requests, so it can't be granted. `deploy.ps1` restores FlipSpot shortcuts after installs.
+  never requests, so it can't be granted. `deploy.ps1` restores FlipSpot shortcuts after installs, but only
+  while Launcher4 is the default home (since M5, Fiero Launcher is).
 
 ## 9. First Claude Code prompt
 
