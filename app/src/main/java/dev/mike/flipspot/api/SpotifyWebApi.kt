@@ -41,6 +41,7 @@ object SpotifyWebApi {
     private fun request(context: Context, method: String, pathOrUrl: String, body: JSONObject?): Result {
         val url = if (pathOrUrl.startsWith("http")) pathOrUrl else BASE + pathOrUrl
         var retried = false
+        var freshConnection = false
         while (true) {
             val token = SpotifyAuth.validAccessToken(context) ?: return Result.NotSignedIn
             try {
@@ -49,6 +50,8 @@ object SpotifyWebApi {
                     connectTimeout = TIMEOUT_MS
                     readTimeout = TIMEOUT_MS
                     setRequestProperty("Authorization", "Bearer $token")
+                    // Retry path: don't reuse a pooled keep-alive socket (see catch below).
+                    if (freshConnection) setRequestProperty("Connection", "close")
                 }
                 if (body != null) {
                     conn.doOutput = true
@@ -79,6 +82,15 @@ object SpotifyWebApi {
                         return Result.Http(code, err)
                     }
                 }
+            } catch (e: java.io.IOException) {
+                Log.w(TAG, "WebApi: $url failed (${e.javaClass.simpleName}: ${e.message})")
+                // A pooled keep-alive connection can go stale while idle and then hang until the read
+                // timeout (seen on device with a healthy network). Retry once on a new connection.
+                if (!freshConnection && e !is java.net.UnknownHostException) {
+                    freshConnection = true
+                    continue
+                }
+                return Result.Network(e)
             } catch (e: Exception) {
                 Log.w(TAG, "WebApi: $url failed (${e.javaClass.simpleName}: ${e.message})")
                 return Result.Network(e)

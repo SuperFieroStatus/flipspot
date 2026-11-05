@@ -25,6 +25,7 @@ import dev.mike.flipspot.ui.KeyActionHandler
 import dev.mike.flipspot.ui.KeyRouter
 import dev.mike.flipspot.ui.ListItem
 import dev.mike.flipspot.ui.ListScreen
+import dev.mike.flipspot.ui.MultiTap
 import dev.mike.flipspot.ui.RoutedKey
 import dev.mike.flipspot.ui.Shortcuts
 import dev.mike.flipspot.ui.say
@@ -55,6 +56,9 @@ class BrowseActivity : Activity(), KeyActionHandler {
         }
         class OpenAlbum(val album: Album) : Row() {
             override val item = ListItem(album.name, album.artists)
+        }
+        class OpenArtist(val hit: Library.Hit) : Row() {
+            override val item = ListItem(hit.name, hit.detail)
         }
         class Song(val track: Track, val index: Int) : Row() {
             override val item = ListItem(track.name, track.artists, dim = !track.playable)
@@ -117,11 +121,82 @@ class BrowseActivity : Activity(), KeyActionHandler {
             MODE_ALBUMS -> "Albums"
             MODE_MADE_FOR_YOU -> "Made for you"
             MODE_AUDIOBOOKS -> "Audiobooks"
+            MODE_QUEUE -> "Up next"
+            MODE_SETTINGS -> "Settings"
+            MODE_PINS -> "Number-key pins"
             else -> contextName
         }
-        list.setEmptyText("Loading…")
         list.requestFocus()
+        if (mode == MODE_SEARCH) {
+            renderQuery("", null)
+            setStatus("2–9 letters · 0 space · Back deletes")
+            list.setEmptyText("Type a song, artist, album or book")
+            return
+        }
+        list.setEmptyText("Loading…")
         load(force = false)
+    }
+
+    // ---- search (M4) ----
+
+    private val multiTap by lazy { MultiTap { text, pending -> renderQuery(text, pending) } }
+    private var searchedQuery = ""
+    private val searchHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private val autoSearch = Runnable { runSearch() }
+
+    private fun renderQuery(text: String, pending: Char?) {
+        title.text = "Search: $text" + (pending?.let { "[$it]" } ?: "") + "_"
+        searchHandler.removeCallbacks(autoSearch)
+        // Search by itself once typing pauses (multi-tap commits after 0.9 s).
+        if ((text + (pending ?: "")).trim().length >= 2) searchHandler.postDelayed(autoSearch, AUTO_SEARCH_MS)
+    }
+
+    private fun runSearch() {
+        searchHandler.removeCallbacks(autoSearch)
+        val q = multiTap.text.trim()
+        if (q.isEmpty() || q == searchedQuery) return
+        searchedQuery = q
+        setStatus("Searching “$q”…")
+        Library.search(this, q) { results, error ->
+            if (isDestroyed || q != searchedQuery) return@search // a newer search superseded this one
+            if (results == null) {
+                setStatus(error ?: "Search failed")
+                return@search
+            }
+            val out = mutableListOf<Row>()
+            fun header(label: String) = out.add(Row.Action(ListItem(label, dim = true)) {})
+            if (results.tracks.isNotEmpty()) {
+                header("— Songs —")
+                results.tracks.forEachIndexed { i, t -> out.add(Row.Song(t, i)) }
+            }
+            fun hits(label: String, hs: List<Library.Hit>) {
+                if (hs.isEmpty()) return
+                header(label)
+                hs.forEach { h ->
+                    out.add(Row.Mix(Playlist(h.uri.substringAfterLast(':'), h.name, h.uri, h.detail, 0, false)))
+                }
+            }
+            if (results.artists.isNotEmpty()) {
+                header("— Artists —")
+                results.artists.forEach { out.add(Row.OpenArtist(it)) }
+            }
+            if (results.albums.isNotEmpty()) {
+                header("— Albums —")
+                results.albums.forEach { h ->
+                    out.add(Row.OpenAlbum(Album(h.uri.substringAfterLast(':'), h.name, h.uri, h.detail, emptyList())))
+                }
+            }
+            hits("— Playlists —", results.playlists)
+            if (results.books.isNotEmpty()) {
+                header("— Audiobooks —")
+                results.books.forEach { out.add(Row.OpenBook(it)) }
+            }
+            rows = out
+            // Land on the first real result, not its header.
+            list.setListItems(rows.map { it.item }, if (rows.size > 1) 1 else 0)
+            if (rows.isEmpty()) list.setEmptyText("Nothing found for “$q”")
+            setStatus(if (rows.isEmpty()) null else "OK plays · Options for more")
+        }
     }
 
     // ---- loading ----
@@ -162,11 +237,73 @@ class BrowseActivity : Activity(), KeyActionHandler {
             }
             MODE_ALBUM -> {
                 val id = intent.getStringExtra(EXTRA_ID) ?: return
+                var fetchedRemote = false
                 Library.albums(this, force) { u ->
-                    show(u) { albums -> songRows(albums.firstOrNull { it.id == id }?.tracks ?: emptyList()) }
+                    val saved = u.data?.firstOrNull { it.id == id }
+                    if (saved != null) {
+                        show(u) { songRows(saved.tracks) }
+                    } else if (u.done && !fetchedRemote) {
+                        // Not one of your saved albums (opened from an artist page or search): fetch it.
+                        fetchedRemote = true
+                        Library.album(this, id) { album, error ->
+                            if (isDestroyed) return@album
+                            if (album == null) {
+                                setStatus(error)
+                                list.setEmptyText(error ?: "Album unavailable")
+                            } else {
+                                rows = songRows(album.tracks)
+                                list.setListItems(rows.map { it.item })
+                                setStatus(null)
+                            }
+                        }
+                    }
+                }
+            }
+            MODE_ARTIST -> {
+                val id = intent.getStringExtra(EXTRA_ID) ?: return
+                val uri = contextUri ?: return
+                val head = listOf<Row>(
+                    Row.Action(ListItem("▶ Play $contextName", "Spotify's mix of their top songs")) { play(uri, false) },
+                    Row.Action(ListItem("⤮ Shuffle $contextName")) { play(uri, true) },
+                )
+                rows = head
+                list.setListItems(rows.map { it.item })
+                Library.artistAlbums(this, id) { albums, error ->
+                    if (isDestroyed) return@artistAlbums
+                    if (albums == null) {
+                        setStatus(error)
+                        return@artistAlbums
+                    }
+                    rows = head + listOf(Row.Action(ListItem("— Albums & singles —", dim = true)) {}) +
+                        albums.map { Row.OpenAlbum(it) }
+                    list.setListItems(rows.map { it.item }, list.selectedIndex)
+                    setStatus(null)
                 }
             }
             MODE_MADE_FOR_YOU -> loadMadeForYou()
+            MODE_SEARCH -> {
+                searchedQuery = "" // "Refresh list" re-runs the search
+                runSearch()
+            }
+            MODE_SETTINGS -> showSettings()
+            MODE_PINS -> showPins()
+            MODE_QUEUE -> Library.queue(this) { current, upNext, error ->
+                if (isDestroyed) return@queue
+                if (upNext == null) {
+                    setStatus(error)
+                    list.setEmptyText(error ?: "Queue unavailable")
+                    return@queue
+                }
+                val out = mutableListOf<Row>()
+                current?.let { out += Row.Action(ListItem("Now: ${it.name}", it.artists, dim = true)) {} }
+                upNext.forEachIndexed { i, t ->
+                    out += Row.Action(ListItem("${i + 1}. ${t.name}", t.artists)) { skipAhead(i + 1) }
+                }
+                rows = out
+                list.setListItems(rows.map { it.item }, if (current != null && rows.size > 1) 1 else 0)
+                if (upNext.isEmpty()) list.setEmptyText("Nothing queued")
+                setStatus("OK skips to that song")
+            }
             MODE_AUDIOBOOKS -> Library.audiobooks(this, force) { u ->
                 show(u) { books -> books.map { Row.OpenBook(it) } }
             }
@@ -379,6 +516,7 @@ class BrowseActivity : Activity(), KeyActionHandler {
             is Row.OpenBook -> openBook(this, row.book)
             is Row.ChapterRow -> book?.let { Audiobooks.playChapter(this, it, row.chapter) }
             is Row.OpenAlbum -> open(this, MODE_ALBUM, row.album.id, row.album.name, row.album.uri)
+            is Row.OpenArtist -> open(this, MODE_ARTIST, row.hit.uri.substringAfterLast(':'), row.hit.name, row.hit.uri)
             is Row.Song -> playSong(row)
         }
     }
@@ -416,6 +554,12 @@ class BrowseActivity : Activity(), KeyActionHandler {
                 opts += "Shuffle" to { play(p.uri, true) }
                 opts += "Pin to key…" to { Shortcuts.choosePinKey(this, p.uri, p.name) }
             }
+            is Row.OpenArtist -> {
+                val h = row.hit
+                opts += "Play" to { play(h.uri, false) }
+                opts += "Shuffle" to { play(h.uri, true) }
+                opts += "Pin to key…" to { Shortcuts.choosePinKey(this, h.uri, h.name) }
+            }
             is Row.OpenAlbum -> {
                 val a = row.album
                 opts += "Play" to { play(a.uri, false) }
@@ -441,6 +585,105 @@ class BrowseActivity : Activity(), KeyActionHandler {
             .show()
     }
 
+    // ---- settings (M4) ----
+
+    private var account: String? = null
+
+    private fun showSettings() {
+        val app = applicationContext
+        val signedIn = dev.mike.flipspot.auth.SpotifyAuth.isSignedIn(this)
+        val version = packageManager.getPackageInfo(packageName, 0).versionName
+        rows = listOf(
+            Row.Action(
+                ListItem(
+                    if (signedIn) "Account: ${account ?: "…"}" else "Not signed in",
+                    "Sign in again: run scripts\\get-token.ps1 on the PC",
+                ),
+            ) { say("On the PC: scripts\\get-token.ps1") },
+            Row.Action(ListItem("Number-key pins", "What 1–9 play")) { open(this, MODE_PINS) },
+            Row.Action(
+                ListItem("Audiobook speed: ${Audiobooks.speedLabel(Audiobooks.preferredSpeed(this))}", "Used when a book starts"),
+            ) { chooseDefaultSpeed() },
+            Row.Action(ListItem("Reload library", "Fetch playlists, songs and books again")) {
+                FlipSpotApp.io.execute { Library.clear(app) }
+                say("Library will reload as you open it")
+            },
+            Row.Action(ListItem("Sign out", "Removes the sign-in from this phone")) { confirmSignOut() },
+            Row.Action(ListItem("FlipSpot $version", "Keypad Spotify for the TCL Flip 2", dim = true)) {},
+        )
+        list.setListItems(rows.map { it.item }, list.selectedIndex)
+        setStatus(null)
+        if (signedIn && account == null) FlipSpotApp.io.execute {
+            val me = dev.mike.flipspot.auth.SpotifyAuth.whoAmI(app) ?: "offline"
+            runOnUiThread {
+                if (isDestroyed) return@runOnUiThread
+                account = me.removeSuffix(" (?)")
+                showSettings()
+            }
+        }
+    }
+
+    private fun chooseDefaultSpeed() {
+        val speeds = Audiobooks.SPEEDS
+        AlertDialog.Builder(this)
+            .setTitle("Audiobook speed")
+            .setSingleChoiceItems(
+                speeds.map { Audiobooks.speedLabel(it) }.toTypedArray(),
+                speeds.indexOf(Audiobooks.preferredSpeed(this)),
+            ) { d, which ->
+                d.dismiss()
+                Audiobooks.savePreferredSpeed(this, speeds[which])
+                showSettings()
+            }
+            .show()
+    }
+
+    private fun confirmSignOut() {
+        AlertDialog.Builder(this)
+            .setTitle("Sign out of Spotify?")
+            .setMessage("Library browsing stops until you run scripts\\get-token.ps1 on the PC again. Playback controls keep working.")
+            .setPositiveButton("Sign out") { _, _ ->
+                dev.mike.flipspot.auth.SpotifyAuth.signOut(this)
+                account = null
+                say("Signed out")
+                showSettings()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun showPins() {
+        rows = (1..9).map { d ->
+            val pin = dev.mike.flipspot.library.Pins.get(this, d)
+            val mode = when (pin?.shuffle) { true -> "shuffled"; false -> "in order"; null -> "" }
+            Row.Action(ListItem("$d: ${pin?.name ?: "—"}", mode, dim = pin == null)) {
+                if (pin == null) return@Action say("Pin from a list: Options > Pin to key")
+                AlertDialog.Builder(this)
+                    .setTitle("$d: ${pin.name}")
+                    .setItems(arrayOf("Play", "Remove pin")) { _, which ->
+                        if (which == 0) {
+                            Shortcuts.playPin(this, d)
+                        } else {
+                            dev.mike.flipspot.library.Pins.clear(this, d)
+                            showPins()
+                        }
+                    }
+                    .show()
+            }
+        }
+        list.setListItems(rows.map { it.item }, list.selectedIndex)
+        setStatus(null)
+    }
+
+    /** Skips [count] songs ahead (there's no "jump to queue item" call), then shows Now Playing. */
+    private fun skipAhead(count: Int) {
+        val h = android.os.Handler(android.os.Looper.getMainLooper())
+        // Spaced out so Spotify registers each skip.
+        for (i in 0 until count) h.postDelayed({ SpotifyRemote.skipNext() }, i * 350L)
+        say(if (count == 1) "Next song" else "Skipping $count songs")
+        h.postDelayed({ if (!isDestroyed) Shortcuts.openNowPlaying(this) }, count * 350L)
+    }
+
     private fun play(uri: String, shuffle: Boolean) {
         SpotifyRemote.playContext(uri, shuffle)
         Shortcuts.openNowPlaying(this)
@@ -456,6 +699,21 @@ class BrowseActivity : Activity(), KeyActionHandler {
 
     override fun onKeyAction(key: RoutedKey, event: KeyEvent): Boolean {
         val repeat = event.repeatCount > 0
+        if (mode == MODE_SEARCH) {
+            when (key.action) {
+                // Digits type instead of playing pins; Back deletes, then leaves when empty.
+                KeyAction.DIGIT -> {
+                    if (!repeat) multiTap.press(key.digit)
+                    return true
+                }
+                KeyAction.BACK -> return multiTap.backspace()
+                KeyAction.OK -> if (!repeat && multiTap.text.trim() != searchedQuery) {
+                    runSearch()
+                    return true
+                }
+                else -> Unit
+            }
+        }
         when (key.action) {
             KeyAction.UP -> list.move(-1)
             KeyAction.DOWN -> list.move(+1)
@@ -467,7 +725,7 @@ class BrowseActivity : Activity(), KeyActionHandler {
                 KeyAction.SOFT_LEFT -> showOptions(rows.getOrNull(list.selectedIndex))
                 KeyAction.SOFT_RIGHT -> Shortcuts.openNowPlaying(this)
                 KeyAction.PLAY_PAUSE -> SpotifyRemote.togglePlayPause()
-                KeyAction.DIGIT -> if (key.digit == 0) say("Search: M4") else Shortcuts.playPin(this, key.digit)
+                KeyAction.DIGIT -> if (key.digit == 0) open(this, MODE_SEARCH) else Shortcuts.playPin(this, key.digit)
                 KeyAction.STAR -> return false
                 else -> Unit
             }
@@ -489,6 +747,12 @@ class BrowseActivity : Activity(), KeyActionHandler {
         const val MODE_ALBUM = "album"
         const val MODE_MADE_FOR_YOU = "made_for_you"
         const val MODE_AUDIOBOOKS = "audiobooks"
+        const val MODE_SEARCH = "search"
+        const val MODE_QUEUE = "queue"
+        const val MODE_ARTIST = "artist"
+        const val MODE_SETTINGS = "settings"
+        const val MODE_PINS = "pins"
+        private const val AUTO_SEARCH_MS = 1_200L
         const val MODE_BOOK = "book"
         private const val EXTRA_AUTHORS = "authors"
         private const val EXTRA_CHAPTERS = "chapters"

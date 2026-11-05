@@ -180,6 +180,25 @@ Keep a `scripts/deploy.ps1` that does build + install + launch + logcat in one g
   speed change and can send one stale "old speed" state right after it, so FlipSpot tracks the speed it set
   and ignores reported speed for 4 s after a change. Debug: `--ei speed <percent>` on HomeActivity.
 
+### M4 findings (2026-11-05)
+
+- **Search:** own multi-tap entry (2–9 letters, 0 space, 1 punctuation, Back deletes) instead of the Kika
+  IME; auto-searches 1.2 s after typing pauses. `market=from_token` needs scope `user-read-private`
+  ("Insufficient client scope" 403), so the phone's region is sent as `market` instead.
+- **Development-mode data limits (Feb 2026):** artist objects carry no followers/popularity/genres (same-name
+  artists can't be told apart; Spotify's first hit is labelled "top match"). `/artists/{id}/albums` rejects
+  `limit` > 10 with 400 (playlists, liked songs, albums and chapters still take 50).
+- **Network:** timeouts on weak office Wi-Fi (RSSI −69) and possibly stale keep-alive sockets; the client
+  retries once on a fresh connection and reports timeouts as "Spotify not responding", not "Offline".
+- **Now Playing:** left soft key = options (pin what's playing via App Remote `subscribeToPlayerContext`,
+  queue, speed, play on this phone); `*` = queue (`GET /me/player/queue`, OK skips ahead to an entry).
+- **Settings:** account, pins (play/remove), default audiobook speed, reload library, sign out.
+- **Release build:** R8 + resource shrinking, **~411 KB** (debug 6.2 MB). The .aar's own keep rules weren't
+  enough (shrunk build said "Spotify app not installed"); `proguard-rules.pro` keeps all of App Remote and
+  auth. Signed with the debug key so it installs over debug builds and needs no second SHA-1.
+- **Logging on the Flip 2:** the log buffer is 64 KB and chatty-prunes busy apps. For debugging:
+  `adb logcat -G 2M` and `adb logcat -P <flipspot uid>` (both reset on reboot).
+
 - **Lists:** `ListScreen` is virtualised (only on-screen rows exist) so long lists stay cheap.
 - **Launcher4:** resets a home-screen key shortcut it doesn't know about (it keeps its own list) and crashed
   once trying to write `Settings.System` without `android.permission.WRITE_SETTINGS`, which its manifest

@@ -91,8 +91,8 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
         }
         items += MenuItem("Made for you") { BrowseActivity.open(this, BrowseActivity.MODE_MADE_FOR_YOU) }
         items += MenuItem("Albums") { BrowseActivity.open(this, BrowseActivity.MODE_ALBUMS) }
-        items += MenuItem("Search") { say("Search: M4") }
-        items += MenuItem("Settings") { say("Settings: M4") }
+        items += MenuItem("Search") { BrowseActivity.open(this, BrowseActivity.MODE_SEARCH) }
+        items += MenuItem("Settings") { BrowseActivity.open(this, BrowseActivity.MODE_SETTINGS) }
         val labels = items.map { it.label }
         if (labels != menu.map { it.label }) {
             menu = items
@@ -148,7 +148,7 @@ class HomeActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
             KeyAction.PLAY_PAUSE -> { if (!repeat) SpotifyRemote.togglePlayPause(); true }
             KeyAction.DIGIT -> {
                 if (!repeat) {
-                    if (key.digit == 0) say("Search: M4") else Shortcuts.playPin(this, key.digit)
+                    if (key.digit == 0) BrowseActivity.open(this, BrowseActivity.MODE_SEARCH) else Shortcuts.playPin(this, key.digit)
                 }
                 true
             }

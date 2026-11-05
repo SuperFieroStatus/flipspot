@@ -108,6 +108,118 @@ object Library {
     fun albums(ctx: Context, force: Boolean, cb: (LibraryUpdate<List<Album>>) -> Unit) =
         load(ctx, "albums", force, ::decodeAlbums, ::fetchAlbums, cb)
 
+    // ---- queue (M4, not cached) ----
+
+    /** Now playing + up next, from GET /me/player/queue. [cb] on main; null list on failure. */
+    fun queue(ctx: Context, cb: (current: Track?, upNext: List<Track>?, error: String?) -> Unit) {
+        val app = ctx.applicationContext
+        FlipSpotApp.io.execute {
+            val r = SpotifyWebApi.get(app, "/me/player/queue")
+            if (r !is Result.Ok || r.json == null) {
+                val err = if (r is Result.Ok) "Nothing playing" else describe(r).error
+                main.post { cb(null, null, err) }
+                return@execute
+            }
+            val cur = r.json.optJSONObject("currently_playing")?.let { decodeTrackArray(JSONArray().put(encodeTrack(it, false))).first() }
+            val arr = r.json.optJSONArray("queue") ?: JSONArray()
+            val next = decodeTrackArray(JSONArray((0 until arr.length()).map { encodeTrack(arr.optJSONObject(it), false) }))
+            main.post { cb(cur, next, null) }
+        }
+    }
+
+    // ---- search (M4, not cached) ----
+
+    /** A playable search hit that isn't a song or a book (artist, album, playlist). */
+    data class Hit(val kind: String, val name: String, val uri: String, val detail: String)
+
+    data class SearchResults(
+        val tracks: List<Track>,
+        val artists: List<Hit>,
+        val albums: List<Hit>,
+        val playlists: List<Hit>,
+        val books: List<Book>,
+    )
+
+    /** GET /search for [query]; [cb] on the main thread with results or an error message. */
+    fun search(ctx: Context, query: String, cb: (SearchResults?, String?) -> Unit) {
+        val app = ctx.applicationContext
+        FlipSpotApp.io.execute {
+            val q = java.net.URLEncoder.encode(query, "UTF-8")
+            // Audiobooks are only returned for a market. market=from_token needs scope user-read-private
+            // ("Insufficient client scope" 403), so use the phone's region instead.
+            val r = SpotifyWebApi.get(app, "/search?q=$q&type=track,artist,album,playlist,audiobook&limit=5&market=${market()}")
+            if (r !is Result.Ok || r.json == null) {
+                main.post { cb(null, (if (r is Result.Ok) null else describe(r).error) ?: "No results") }
+                return@execute
+            }
+            val j = r.json
+            fun items(type: String): List<JSONObject> {
+                val arr = j.optJSONObject(type)?.optJSONArray("items") ?: return emptyList()
+                // Spotify sometimes returns null entries (e.g. removed playlists).
+                return (0 until arr.length()).mapNotNull { arr.optJSONObject(it) }
+            }
+            val tracks = items("tracks").map { encodeTrack(it, false) }.let { decodeTrackArray(JSONArray(it)) }
+            // Development-mode responses have no followers/popularity/genres, so same-named artists can't be
+            // told apart by data; Spotify ranks the best match first, so say so.
+            val artists = items("artists").mapIndexed { i, it ->
+                Hit("artist", it.optString("name"), it.optString("uri"), if (i == 0) "Artist · top match" else "Artist")
+            }
+            val albums = items("albums").map { Hit("album", it.optString("name"), it.optString("uri"), artistNames(it)) }
+            val playlists = items("playlists").map {
+                Hit("playlist", it.optString("name"), it.optString("uri"),
+                    it.optJSONObject("owner")?.optString("display_name") ?: "Playlist")
+            }
+            val books = items("audiobooks").map { b ->
+                val authors = b.optJSONArray("authors")
+                Book(
+                    b.optString("id"), b.optString("name"), b.optString("uri"),
+                    (0 until (authors?.length() ?: 0)).mapNotNull { authors?.optJSONObject(it)?.optString("name") }
+                        .joinToString(", "),
+                    b.optInt("total_chapters"),
+                )
+            }
+            main.post { cb(SearchResults(tracks, artists, albums, playlists, books), null) }
+        }
+    }
+
+    private fun market(): String = java.util.Locale.getDefault().country.takeIf { it.length == 2 } ?: "US"
+
+    /** An artist's albums and singles, newest first (not cached). [cb] on main. */
+    fun artistAlbums(ctx: Context, artistId: String, cb: (List<Album>?, String?) -> Unit) {
+        val app = ctx.applicationContext
+        FlipSpotApp.io.execute {
+            val out = mutableListOf<Album>()
+            val err = SpotifyWebApi.forEachPaged(
+                // limit > 10 is a 400 for this endpoint now (probed 2026-11-05); page through 10 at a time.
+                app, "/artists/$artistId/albums?include_groups=album,single,compilation&limit=10&market=${market()}",
+            ) { a ->
+                val year = a.optString("release_date").take(4)
+                val kind = a.optString("album_type").replaceFirstChar { it.uppercase() }
+                out += Album(a.optString("id"), a.optString("name"), a.optString("uri"), "$year · $kind", emptyList())
+            }
+            main.post { if (err != null) cb(null, describe(err).error) else cb(out, null) }
+        }
+    }
+
+    /** Any album with its songs, for albums that aren't saved (artist pages, search). Not cached. */
+    fun album(ctx: Context, albumId: String, cb: (Album?, String?) -> Unit) {
+        val app = ctx.applicationContext
+        FlipSpotApp.io.execute {
+            val r = SpotifyWebApi.get(app, "/albums/$albumId?market=${market()}")
+            val a = (r as? Result.Ok)?.json
+            if (a == null) {
+                main.post { cb(null, describe(r).error) }
+                return@execute
+            }
+            val tracks = JSONArray()
+            a.optJSONObject("tracks")?.optJSONArray("items")?.let { arr ->
+                for (i in 0 until arr.length()) tracks.put(encodeTrack(arr.optJSONObject(i), false))
+            }
+            val album = Album(a.optString("id"), a.optString("name"), a.optString("uri"), artistNames(a), decodeTrackArray(tracks))
+            main.post { cb(album, null) }
+        }
+    }
+
     // ---- audiobooks (M3) ----
 
     fun audiobooks(ctx: Context, force: Boolean, cb: (LibraryUpdate<List<Book>>) -> Unit) =
@@ -250,7 +362,7 @@ object Library {
 
     private fun describe(r: Result): Fetched = when (r) {
         is Result.NotSignedIn -> Fetched(null, "Not signed in")
-        is Result.Network -> Fetched(null, "Offline")
+        is Result.Network -> Fetched(null, if (r.error is java.net.SocketTimeoutException) "Spotify not responding" else "Offline")
         is Result.Http -> Fetched(null, "Spotify error ${r.code}", forbidden = r.code == 403)
         is Result.Ok -> Fetched(null, "Empty response")
     }

@@ -17,6 +17,7 @@ import com.spotify.protocol.client.Subscription
 import com.spotify.protocol.types.Empty
 import com.spotify.protocol.types.ListItem
 import com.spotify.protocol.types.PlaybackSpeed
+import com.spotify.protocol.types.PlayerContext
 import com.spotify.protocol.types.PlayerState
 import dev.mike.flipspot.BuildConfig
 import java.util.concurrent.CopyOnWriteArraySet
@@ -60,6 +61,11 @@ object SpotifyRemote {
     private var appContext: Context? = null
     private var remote: SpotifyAppRemote? = null
     private var playerSub: Subscription<PlayerState>? = null
+    private var contextSub: Subscription<PlayerContext>? = null
+
+    /** What's playing from (playlist, album, collection, show), for "Pin what's playing". */
+    var playerContext: PlayerContext? = null
+        private set
     private var wanted = false
     private var retryDelayMs = INITIAL_RETRY_MS
     private var pendingPlayUri: String? = null
@@ -153,6 +159,10 @@ object SpotifyRemote {
         }
         sub.setErrorCallback { e -> Log.w(TAG, "Remote: player-state subscription error", e) }
         playerSub = sub
+        val ctxSub = appRemote.playerApi.subscribeToPlayerContext()
+        ctxSub.setEventCallback { c -> main.post { playerContext = c?.takeIf { !it.uri.isNullOrEmpty() } } }
+        ctxSub.setErrorCallback { e -> Log.w(TAG, "Remote: player-context subscription error", e) }
+        contextSub = ctxSub
         pendingPlayUri?.let { uri ->
             pendingPlayUri = null
             playUri(uri)
@@ -181,6 +191,8 @@ object SpotifyRemote {
     private fun teardown() {
         playerSub?.cancel()
         playerSub = null
+        contextSub?.cancel()
+        contextSub = null
         remote?.let { SpotifyAppRemote.disconnect(it) }
         remote = null
     }

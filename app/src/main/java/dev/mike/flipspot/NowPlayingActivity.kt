@@ -25,7 +25,8 @@ import dev.mike.flipspot.ui.say
  *   OK / #  play-pause      Left / Right  previous / next
  *   4 / 6   -15 s / +30 s   7 / 9         -5 min / +5 min
  *   5       shuffle         8             repeat
- *   *       queue (M4)      Back          up one level
+ *   *       queue           Back          up one level
+ *   0       search          Left soft     options (pin what's playing, queue, speed)
  *   Up/Down speed 1x/1.2x/1.5x/2x (audiobooks and podcasts only)
  */
 class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener {
@@ -241,17 +242,56 @@ class NowPlayingActivity : Activity(), KeyActionHandler, SpotifyRemote.Listener 
                 9 -> seek(5 * 60_000)
                 5 -> SpotifyRemote.toggleShuffle()
                 8 -> SpotifyRemote.toggleRepeat()
-                0 -> say("Search: M4")
+                0 -> BrowseActivity.open(this, BrowseActivity.MODE_SEARCH)
                 else -> Shortcuts.playPin(this, key.digit) // 1-3 (4-9 are transport keys here)
             }
-            KeyAction.STAR -> say("Queue: M4")
-            KeyAction.SOFT_LEFT -> if (playingElsewhere) playHere() else say("Options: coming in M4")
+            KeyAction.STAR -> BrowseActivity.open(this, BrowseActivity.MODE_QUEUE)
+            KeyAction.SOFT_LEFT -> if (playingElsewhere) playHere() else showOptions()
             KeyAction.SOFT_RIGHT -> finish() // labelled "Home": back to the menu
             KeyAction.UP -> stepSpeed(+1)
             KeyAction.DOWN -> stepSpeed(-1)
             KeyAction.BACK -> return false
         }
         return true
+    }
+
+    /** Left soft key: what you can do with what's playing. */
+    private fun showOptions() {
+        val opts = mutableListOf<Pair<String, () -> Unit>>()
+        val ctx = SpotifyRemote.playerContext
+        val ctxUri = ctx?.uri
+        if (ctxUri != null) {
+            val name = ctx.title?.ifEmpty { null } ?: "this"
+            val isBook = ctxUri.startsWith("spotify:show:")
+            opts += "Pin “$name” to key…" to { Shortcuts.choosePinKey(this, ctxUri, name, askShuffle = !isBook) }
+        }
+        opts += "Queue (*)" to { BrowseActivity.open(this, BrowseActivity.MODE_QUEUE) }
+        if (isSpoken(SpotifyRemote.snapshot.state?.track)) {
+            opts += "Speed (Up/Down)…" to ::chooseSpeed
+        }
+        opts += "Play on this phone" to ::playHere
+        android.app.AlertDialog.Builder(this)
+            .setItems(opts.map { it.first }.toTypedArray()) { _, which -> opts[which].second() }
+            .show()
+    }
+
+    private fun chooseSpeed() {
+        val speeds = Audiobooks.SPEEDS
+        val now = currentSpeed()
+        android.app.AlertDialog.Builder(this)
+            .setTitle("Speed")
+            .setSingleChoiceItems(
+                speeds.map { Audiobooks.speedLabel(it) }.toTypedArray(),
+                speeds.indexOf(now),
+            ) { d, which ->
+                d.dismiss()
+                val target = speeds[which]
+                SpotifyRemote.setSpeed(target) { ok ->
+                    if (ok) Audiobooks.savePreferredSpeed(this, target)
+                    say(if (ok) Audiobooks.speedLabel(target) else "Spotify refused that speed")
+                }
+            }
+            .show()
     }
 
     private fun isSpoken(track: com.spotify.protocol.types.Track?): Boolean =

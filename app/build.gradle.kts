@@ -18,8 +18,8 @@ android {
         applicationId = "dev.mike.flipspot"
         minSdk = 30
         targetSdk = 30
-        versionCode = 1
-        versionName = "0.0.1-m0"
+        versionCode = 4
+        versionName = "0.4.0-m4"
 
         buildConfigField("String", "SPOTIFY_CLIENT_ID", "\"$spotifyClientId\"")
         buildConfigField("String", "SPOTIFY_REDIRECT_URI", "\"flipspot://callback\"")
@@ -32,7 +32,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false // M4: turn on R8
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // Signed with the debug key on purpose: it installs over the debug build (keeping sign-in,
+            // cache and pins) and needs no second SHA-1 on the Spotify dashboard. For distribution,
+            // create a release keystore, register its SHA-1, and point this at it.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
